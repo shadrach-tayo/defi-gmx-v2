@@ -172,14 +172,31 @@ abstract contract GmxHelper {
         bool isIncrease
     ) internal view returns (uint256 sizeDeltaUsd) {
         // Calculate sizeDeltaUsd so that new position's leverage is close to 1
+        Position.Props memory position = getPosition(getPositionKey());
         if (isIncrease) {
             // new position size = long token price * new collateral amount
+            uint256 newCollateralAmount =
+                position.numbers.collateralAmount + longTokenAmount;
+            // newCollateralAmount has 18 decimals (longTokenDecimals)
+            // longTokenPrice has 8 decimals (CHAINLINK_DECIMALS)
+            // 10 ** (30 - 18 - 8) = 10 ** 4
+            // Final decimals: 18 + 8 + 4 = 30 decimals
+            uint256 newPositionInUsd =
+                newCollateralAmount * longTokenPrice * 1e4;
             // new collateral amount = position.collateralAmount + longTokenAmount
-            // sizeDeltaUsd = new position size - position.sizeInUsd
+            if (newPositionInUsd > position.numbers.sizeInUsd) {
+                sizeDeltaUsd = newPositionInUsd - position.numbers.sizeInUsd;
+            }
         } else {
             // new position size = long token price * new collateral amount
             // new collateral amount = position.collateralAmount - longTokenAmount
-            // sizeDeltaUsd = new position size - position.sizeInUsd
+            uint256 newCollateralAmount =
+                position.numbers.collateralAmount - longTokenAmount;
+            uint256 newPositionInUsd =
+                newCollateralAmount * longTokenPrice * 1e4;
+            if (newPositionInUsd > position.numbers.sizeInUsd) {
+                sizeDeltaUsd = position.numbers.sizeInUsd - newPositionInUsd;
+            }
         }
     }
 
@@ -195,8 +212,55 @@ abstract contract GmxHelper {
         Position.Props memory position = getPosition(positionKey);
 
         // Task 2.1 - Calculate position size delta
+        uint256 sizeDeltaUsd = getSizeDeltaUsd(
+            longTokenPrice,
+            position.numbers.sizeInUsd,
+            position.numbers.collateralAmount,
+            longTokenAmount,
+            true
+        );
+
+        require(sizeDeltaUsd > 0, "sizeDeltaUsd = 0");
+
+        // send execution fee to the order vault
+        exchangeRouter.sendWnt{value: executionFee}(ORDER_VAULT);
+
+        // send long token to the order vault
+        longToken.approve(ROUTER, longTokenAmount);
+        exchangeRouter.sendTokens(address(longToken), ROUTER, longTokenAmount);
+
+        uint256 acceptablePrice =
+            longTokenPrice * 1e12 / CHAINLINK_MULTIPLIER * 90 / 100;
 
         // Task 2.2 - Create market increase order
+        return exchangeRouter.createOrder(
+            IBaseOrderUtils.CreateOrderParams({
+                addresses: IBaseOrderUtils.CreateOrderParamsAddresses({
+                    receiver: address(this),
+                    callbackContract: address(0),
+                    uiFeeReceiver: address(0),
+                    market: address(0),
+                    initialCollateralToken: address(longToken),
+                    swapPath: new address[](0)
+                }),
+                numbers: IBaseOrderUtils.CreateOrderParamsNumbers({
+                    sizeDeltaUsd: sizeDeltaUsd,
+                    initialCollateralDeltaAmount: 0,
+                    triggerPrice: 0,
+                    acceptablePrice: acceptablePrice,
+                    executionFee: executionFee,
+                    callbackGasLimit: 0,
+                    minOutputAmount: 0,
+                    validFromTime: 0
+                }),
+                orderType: Order.OrderType.MARKET_INCREASE,
+                decreasePositionSwapType: Order.DecreasePositionSwapType.NONE,
+                isLong: true,
+                shouldUnwrapNativeToken: true,
+                autoCancel: false,
+                referralCode: bytes32(uint256(0))
+            })
+        );
     }
 
     // Task 3: Create market decrease order
@@ -223,15 +287,73 @@ abstract contract GmxHelper {
         require(longTokenAmount > 0, "long token amount = 0");
 
         // Task 3.1 - Calculate position size delta
+        uint256 sizeDeltaUsd = getSizeDeltaUsd(
+            longTokenPrice,
+            position.numbers.sizeInUsd,
+            position.numbers.collateralAmount,
+            longTokenAmount,
+            false
+        );
+
+        require(sizeDeltaUsd > 0, "sizeDeltaUsd = 0");
 
         // Task 3.2 - Send market decrease order
+        exchangeRouter.sendWnt{value: executionFee}(ORDER_VAULT);
+
+        // send long token to the order vault
+        longToken.approve(ROUTER, longTokenAmount);
+        exchangeRouter.sendTokens(address(longToken), ROUTER, longTokenAmount);
+
+        uint256 acceptablePrice =
+            longTokenPrice * 1e12 / CHAINLINK_MULTIPLIER * 110 / 100;
+
+        return exchangeRouter.createOrder(
+            IBaseOrderUtils.CreateOrderParams({
+                addresses: IBaseOrderUtils.CreateOrderParamsAddresses({
+                    receiver: receiver,
+                    callbackContract: callbackContract,
+                    uiFeeReceiver: address(0),
+                    market: address(0),
+                    initialCollateralToken: address(longToken),
+                    swapPath: new address[](0)
+                }),
+                numbers: IBaseOrderUtils.CreateOrderParamsNumbers({
+                    sizeDeltaUsd: sizeDeltaUsd,
+                    initialCollateralDeltaAmount: longTokenAmount,
+                    triggerPrice: 0,
+                    acceptablePrice: acceptablePrice,
+                    executionFee: executionFee,
+                    callbackGasLimit: callbackGasLimit,
+                    minOutputAmount: 0,
+                    validFromTime: 0
+                }),
+                orderType: Order.OrderType.MARKET_DECREASE,
+                decreasePositionSwapType: Order
+                    .DecreasePositionSwapType
+                    .SwapPnlTokenToCollateralToken,
+                isLong: false,
+                shouldUnwrapNativeToken: true,
+                autoCancel: false,
+                referralCode: bytes32(uint256(0))
+            })
+        );
 
         // Decreasing position that results in small position size causes liquidation error
     }
 
     // Task 4: Cancel order
-    function cancelOrder(bytes32 orderKey) internal {}
+    function cancelOrder(bytes32 orderKey) internal {
+        exchangeRouter.cancelOrder(orderKey);
+    }
 
     // Task 5: Claim funding fees
-    function claimFundingFees() internal {}
+    function claimFundingFees() internal {
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(longToken);
+
+        address[] memory markets = new address[](1);
+        markets[0] = address(marketToken);
+
+        exchangeRouter.claimFundingFees(markets, tokens, address(this));
+    }
 }

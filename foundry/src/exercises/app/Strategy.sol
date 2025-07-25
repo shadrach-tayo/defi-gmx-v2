@@ -10,6 +10,7 @@ import {GmxHelper} from "./GmxHelper.sol";
 
 contract Strategy is Auth, GmxHelper {
     IERC20 public constant weth = IERC20(WETH);
+    GmxHelper public gmxHelper;
 
     constructor(address oracle)
         GmxHelper(
@@ -25,7 +26,16 @@ contract Strategy is Auth, GmxHelper {
     receive() external payable {}
 
     // Task 1: Calculate total vaule managed by this contract in terms of WETH
-    function totalValueInToken() external view returns (uint256) {}
+    function totalValueInToken() external view returns (uint256) {
+        uint256 value = weth.balanceOf(address(this));
+        uint256 remainingCollateral = getPositionWithPnlInToken();
+        if (remainingCollateral >= 0) {
+            value += uint256(remainingCollateral);
+        } else {
+            value -= Math.min(value, uint256(-remainingCollateral));
+        }
+        return value;
+    }
 
     // Task 2: Create market increase order
     function increase(uint256 wethAmount)
@@ -33,7 +43,9 @@ contract Strategy is Auth, GmxHelper {
         payable
         auth
         returns (bytes32 orderKey)
-    {}
+    {
+        orderKeycreateIncreaseShortPositionOrder(msg.value, wethAmount);
+    }
 
     // Task 3: Create market decrease order
     // Function call is from the vault when the callback contract is not address(0).
@@ -44,17 +56,38 @@ contract Strategy is Auth, GmxHelper {
         returns (bytes32 orderKey)
     {
         if (callbackContract == address(0)) {
-            // Write your code here
+            return createDecreaseShortPositionOrder(
+                msg.value, wethAmount, address(this), callbackContract, 0
+            );
         } else {
-            // Write your code here
+            uint256 maxCallbackGasLimit = getMaxCallbackGasLimit();
+            require(
+                msg.value > maxCallbackGasLimit,
+                "msg.value < maxCallbackGasLimit"
+            );
+
+            Position.Props memory position = getPosition(getPositionKey());
+            uint256 longTokenAmount = getPositionCollateralAmount() * wethAmount
+                / getPositionWithPnlInToken();
+            orderKey = createDecreaseShortPositionOrder(
+                msg.value,
+                longTokenAmount,
+                callbackContract,
+                callbackContract,
+                maxCallbackGasLimit
+            );
         }
     }
 
     // Task 4: Cancel an order
-    function cancel(bytes32 orderKey) external payable auth {}
+    function cancel(bytes32 orderKey) external payable auth {
+        cancelOrder(orderKey);
+    }
 
     // Task 5: Claim funding fees
-    function claim() external {}
+    function claim() external {
+        claimFundingFees();
+    }
 
     function transfer(address dst, uint256 amount) external auth {
         weth.transfer(dst, amount);

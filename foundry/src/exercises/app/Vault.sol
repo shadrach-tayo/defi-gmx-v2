@@ -38,7 +38,9 @@ contract Vault is Auth {
 
     // Task 1: Calculate the total value managed by this contract
     function totalValueInToken() public view returns (uint256) {
-        return 0;
+        uint256 wethBalance = weth.balanceOf(address(this));
+        uint256 collateralBalance = strategy.totalValueInToken();
+        return wethBalance + collateralBalance;
     }
 
     function getWithdrawOrder(bytes32 key)
@@ -54,7 +56,19 @@ contract Vault is Auth {
         external
         guard
         returns (uint256 shares)
-    {}
+    {
+        if (address(strategy) != address(0)) {
+            strategy.claim();
+        }
+
+        // calculate shares to mint
+        uint256 share =
+            _convertToShares(totalSupply, totalValueInToken(), wethAmount);
+        // transfer weth from msg.sender to this contract
+        weth.transferFrom(msg.sender, address(this), wethAmount);
+        // mint shares to msg.sender
+        _mint(msg.sender, share);
+    }
 
     // NOTE: Withdrawal delay or gradual profit distribution should be implemented
     // to prevent users from depositing before profit is claimed by the strategy and then
@@ -66,13 +80,93 @@ contract Vault is Auth {
         payable
         guard
         returns (uint256 wethSent, bytes32 withdrawOrderKey)
-    {}
+    {
+        if (address(strategy) != address(0)) {
+            strategy.claim();
+        }
+
+        wethAmount = _convertToWeth(totalSupply, totalValueInToken(), shares);
+        require(wethAmount > 0, "weth amount = 0");
+
+        uint256 wethInVault = weth.balanceOf(address(this));
+        uint256 strategyWethBalance = weth.balanceOf(address(strategy));
+        uint256 totalWethBalance = wethInVault + strategyWethBalance;
+
+        uint256 wethRemaining = wethAmount;
+
+        wethRemaining -= Math.min(totalWethBalance, wethRemaining);
+
+        if (wethRemaining > 0 && address(strategy) != address(0)) {
+            uint256 wethInStrategy = weth.balanceOf(address(strategy));
+            if (wethInStrategy > 0) {
+                uint256 wethToTransfer = Math.min(wethInStrategy, wethRemaining);
+                wethRemaining -= wethToTransfer;
+                strategy.transfer(address(this), wethToTransfer);
+            }
+        }
+
+        if (wethRemaining == 0) {
+            _burn(msg.sender, shares);
+            transfer(msg.sender, wethSent);
+            if (msg.value > 0) {
+                (bool ok,) = msg.sender.call{value: msg.sender}("");
+                require(ok, "Send ETH failed");
+            }
+        } else {
+            uint256 sharesRemaining = shares * wethRemaining / wethAmount;
+            _burn(msg.sender, shares - sharesRemaining);
+            _lock(msg.sender, sharesRemaining);
+
+            wethSent = wethAmount - wethRemaining;
+            transfer(msg.sender, wethSent);
+
+            if (sharesRemaining > 0) {
+                require(
+                    withdrawCallback.code.length > 0,
+                    "withdraw callback not set"
+                );
+
+                withdrawOrderKey = strategy.decrease{value: msg.value}(
+                    wethRemaining, withdrawCallback
+                );
+                require(withdrawOrderKey != bytes32(0), "invalid order key");
+                require(
+                    withdrawOrders[withdrawOrderKey].account == address(0),
+                    "order is not empty"
+                );
+                withdrawOrders[withdrawOrderKey] = IVault.WithdrawOrder({
+                    account: msg.sender,
+                    shares: sharesRemaining,
+                    weth: wethRemaining
+                });
+            }
+        }
+    }
 
     // Task 4: Cancel withdraw order
-    function cancelWithdrawOrder(bytes32 key) external guard {}
+    function cancelWithdrawOrder(bytes32 key) external guard {
+        IVault.WithdrawOrder memory withdrawOrder = withdrawOrders[key];
+        require(withdrawOrder.account != address(0), "invalid order key");
+        require(withdrawOrder.account == msg.sender, "invalid order account");
+
+        require(withdrawCallback.code.length > 0, "withdraw callback not set");
+
+        strategy.cancel(key);
+    }
 
     // Task 5: Delete withdraw order. This function is called from WithdrawCallback
-    function removeWithdrawOrder(bytes32 key, bool ok) external auth {}
+    function removeWithdrawOrder(bytes32 key, bool ok) external auth {
+        IVault.WithdrawOrder memory withdrawOrder = withdrawOrders[key];
+        require(withdrawOrder.account != address(0), "invalid order key");
+
+        _unlock(withdrawOrder.account, withdrawOrder.shares);
+
+        if (ok) {
+            _burn(withdrawOrder.account, withdrawOrder.shares);
+        }
+
+        delete withdrawOrders[key];
+    }
 
     // OpenZeppelin vault inflation protection
     // https://github.com/OpenZeppelin/openzeppelin-contracts/blob/1873ecb38e0833fa3552f58e639eeeb134b82135/contracts/token/ERC20/extensions/ERC4626.sol#L225-L234

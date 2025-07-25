@@ -36,7 +36,15 @@ contract WithdrawCallback is Auth {
         // Order key
         bytes32 key,
         EventUtils.EventLogData memory eventData
-    ) external payable onlyGmx {}
+    ) external payable onlyGmx {
+        if (refunds[key] != address(0)) {
+            address refundAccount = refunds[key];
+            delete refunds[key];
+
+            (bool ok,) = refundAccount.call{value: msg.value}("");
+            require(ok, "refund failed");
+        }
+    }
 
     // Task 2: Order execution callback
     function afterOrderExecution(
@@ -44,7 +52,30 @@ contract WithdrawCallback is Auth {
         bytes32 key,
         Order.Props memory order,
         EventUtils.EventLogData memory eventData
-    ) external onlyGmx {}
+    ) external onlyGmx {
+        require(
+            order.orderType == Order.OrderType.MARKET_INCREASE,
+            "order type is not market increase"
+        );
+        IVault.WithdrawOrder memory withdrawOrder = vault.getWithdrawOrder(key);
+        require(withdrawOrder.account != address(0), "invalid order key");
+
+        // Set refund account
+        setRefundAccount(key, withdrawOrder.account);
+
+        // Remove withdraw order
+        vault.removeWithdrawOrder(key, true);
+
+        // Transfer at most the amount of WETH stored in the withdraw order to the account
+        //that is associated with this withdraw order. Send remaining WETH to the vault.
+        uint256 bal = weth.balanceOf(address(this));
+        if (withdrawOrder.weth > bal) {
+            weth.transfer(withdrawOrder.account, bal);
+        } else {
+            weth.transfer(withdrawOrder.account, withdrawOrder.weth);
+            weth.transfer(address(vault), bal - withdrawOrder.weth);
+        }
+    }
 
     // Task 3: Order cancellation callback
     function afterOrderCancellation(
@@ -52,7 +83,20 @@ contract WithdrawCallback is Auth {
         bytes32 key,
         Order.Props memory order,
         EventUtils.EventLogData memory eventData
-    ) external onlyGmx {}
+    ) external onlyGmx {
+        IVault.WithdrawOrder memory withdrawOrder = vault.getWithdrawOrder(key);
+        require(
+            order.orderType == Order.OrderType.MARKET_DECREASE,
+            "invalid order type"
+        );
+        require(withdrawOrder.account != address(0), "invalid order key");
+
+        // Set refund account
+        setRefundAccount(key, withdrawOrder.account);
+
+        // Remove withdraw order
+        vault.removeWithdrawOrder(key, false);
+    }
 
     // Task 4: Order frozen callback
     function afterOrderFrozen(
@@ -60,7 +104,20 @@ contract WithdrawCallback is Auth {
         bytes32 key,
         Order.Props memory order,
         EventUtils.EventLogData memory eventData
-    ) external onlyGmx {}
+    ) external onlyGmx {
+        IVault.WithdrawOrder memory withdrawOrder = vault.getWithdrawOrder(key);
+        require(
+            order.orderType == Order.OrderType.MARKET_DECREASE,
+            "invalid order type"
+        );
+        require(withdrawOrder.account != address(0), "invalid order key");
+
+        // Set refund account
+        setRefundAccount(key, withdrawOrder.account);
+
+        // Remove withdraw order
+        vault.removeWithdrawOrder(key, false);
+    }
 
     function transfer(address dst, uint256 amount) external auth {
         weth.transfer(dst, amount);

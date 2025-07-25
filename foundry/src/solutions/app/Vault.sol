@@ -149,7 +149,7 @@ contract Vault is Auth {
 
     // Task 4: Cancel withdraw order
     function cancelWithdrawOrder(bytes32 key) external guard {
-        require(msg.sender == withdrawOrders[key].account, "not owner of order");
+        require(withdrawOrders[key].account == msg.sender, "not owner of order");
         require(
             withdrawCallback.code.length > 0,
             "withdraw callback is not a contract"
@@ -160,6 +160,7 @@ contract Vault is Auth {
     // Task 5: Delete withdraw order. This function is called from WithdrawCallback
     function removeWithdrawOrder(bytes32 key, bool ok) external auth {
         IVault.WithdrawOrder memory withdrawOrder = withdrawOrders[key];
+        require(withdrawOrder.account != address(0), "invalid order key");
 
         _unlock(withdrawOrder.account, withdrawOrder.shares);
         if (ok) {

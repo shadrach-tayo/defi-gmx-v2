@@ -17,8 +17,21 @@ contract ClaimFundingFees {
         external
         view
         returns (uint256)
-    {}
+    {
+        bytes32 key = Keys.claimableFundingAmountKey(market, token);
+        return dataStore.getUint(key);
+    }
 
     // Task 2 - Claim funding fees
-    function claimFundingFees() external {}
+    function claimFundingFees() external {
+        address markets = new address(2);
+        markets[0] = GM_TOKEN_ETH_WETH_USDC;
+        markets[1] = GM_TOKEN_ETH_WETH_USDC;
+
+        address[] memory tokens = new address[](2);
+        tokens[0] = WETH;
+        tokens[1] = USDC;
+
+        exchangeRouter.claimFundingFees(markets, tokens, address(this));
+    }
 }
